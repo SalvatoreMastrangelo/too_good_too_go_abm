@@ -1,0 +1,191 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+
+\sisetup{detect-all}
+
+\title{TGTG Fast Simulation Notebook: Model, Simulation Design, and Results}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Scope and Reproducibility}
+This document \emph{only} describes what happens in the notebook \texttt{tgtg\_research\_runner.ipynb}:
+\begin{itemize}
+  \item It imports the compiled simulator from \texttt{tgtg\_fast.py}.
+  \item It trains a baker policy (production vector $q$ and reserved share $b$) using a simple evolutionary optimizer.
+  \item It compares (i) a baseline with $b=0$ (no TGTG) against (ii) a regime where $b$ is optimized (TGTG available).
+  \item It evaluates trained policies out-of-sample (fresh randomness and fresh demand draws).
+  \item It then defines a hyperparameter sweep over $L$, relative prices, and demand volatility, and produces summary plots from that sweep (this is described structurally here; results appear when the sweep is executed).
+\end{itemize}
+
+\section{Economic Environment and State Variables (as implemented)}
+The environment is parameterized by:
+\begin{itemize}
+  \item $N$: number of consumers per day.
+  \item $L$: number of goods.
+  \item $r \in [0,1]$: walk-out probability when a consumer encounters a stock-out at a given preference rank.
+  \item $\chi$: unit cost of production.
+  \item $\rho$: regular unit price.
+  \item $\tau$: TGTG unit price \emph{per unit} in this notebook implementation.
+\end{itemize}
+
+\subsection{Preferences}
+Consumers are represented by an integer matrix \texttt{prefs}$\in\{0,\dots,L-1\}^{N \times L}$.
+Row $i$ is a permutation of goods, interpreted as a strict ranking of preferred goods for consumer $i$.
+The notebook uses \texttt{mode="correlated"} in its main experiments (preferences are not i.i.d. uniform permutations).
+
+\subsection{Daily demand: visit probability}
+On day $t$, each consumer visits independently with probability $\alpha_t \in (0,1)$.
+The notebook studies multiple stochastic specifications for the path $\{\alpha_t\}_{t=1}^D$:
+\begin{enumerate}
+  \item \textbf{Constant:} $\alpha_t \equiv \alpha$.
+  \item \textbf{Beta shocks (i.i.d.):} $\alpha_t \sim \mathrm{Beta}(a,b)$ with mean fixed at $\mathbb{E}[\alpha_t]=\mu$ and ``concentration'' $\kappa=a+b$ controlling volatility.
+  \item \textbf{Logit-AR(1):} letting $z_t=\log(\alpha_t/(1-\alpha_t))$,
+  \[
+     z_t = \phi z_{t-1} + \varepsilon_t,\quad \varepsilon_t \sim \mathcal{N}(0,\sigma^2), \quad
+     \alpha_t = \frac{1}{1+e^{-z_t}}.
+  \]
+\end{enumerate}
+
+\section{Baker policy, timing, and sales mechanics (as implemented)}
+The baker chooses:
+\begin{itemize}
+  \item $q \in \mathbb{Z}_{\ge 0}^L$: production quantities for each good (fixed within an epoch).
+  \item $b \in [0,1]$: share of total inventory reserved for TGTG.
+\end{itemize}
+
+At the start of each day, inventory is set to $q$ and total inventory is $Q=\sum_{\ell=1}^L q_\ell$.
+Reserved inventory is computed as $\mathrm{reserved}=\lfloor bQ \rfloor$.
+
+\subsection{Regular sales process}
+Consumers arrive in a random order.
+A visiting consumer attempts to buy according to their ranking:
+\begin{itemize}
+  \item If their top-ranked available good is in stock and selling one unit would \emph{not} reduce total inventory below \texttt{reserved}, a sale occurs at price $\rho$.
+  \item If the good is out of stock at a given rank, the consumer walks out with probability $r$; otherwise they check the next rank.
+  \item If total inventory is already at or below \texttt{reserved}, regular sales are effectively closed and visiting consumers walk out.
+\end{itemize}
+
+\subsection{TGTG sales and waste}
+After regular sales:
+\begin{itemize}
+  \item TGTG sales equal \texttt{reserved} units (capped by remaining inventory), priced at $\tau$ per unit.
+  \item Waste is leftover inventory after TGTG sales.
+\end{itemize}
+
+\subsection{Profit and risk-adjusted fitness}
+Daily profit is:
+\[
+\pi_t = (\text{regular\_sales})\rho + (\text{tgtg\_sales})\tau - \chi \sum_{\ell=1}^L q_\ell.
+\]
+Over an epoch of $D$ days, the notebook computes mean and standard deviation of $\pi_t$ and defines fitness:
+\[
+\mathrm{fitness} = D\left(\bar\pi - \gamma \sigma_\pi\right).
+\]
+
+\section{Simulation acceleration and parallelization (as implemented)}
+The notebook relies on:
+\begin{itemize}
+  \item \textbf{Common random numbers:} for each generation, all candidates share pre-generated arrival permutations and uniform draws, reducing selection noise.
+  \item \textbf{Numba-compiled core:} the inner simulation loop over consumers and days is compiled.
+  \item \textbf{Parallel evaluation:} candidates in a population are evaluated in parallel using a thread pool (Numba releases the GIL for compiled regions).
+\end{itemize}
+
+\section{Main result block executed: Baseline vs TGTG across demand specifications}
+For each demand specification, the notebook runs two training problems:
+\begin{itemize}
+  \item \textbf{Baseline:} force $b=0$ (no TGTG).
+  \item \textbf{TGTG available:} optimize both $q$ and $b$.
+\end{itemize}
+Then it performs out-of-sample evaluation (fresh randomness and fresh demand draws) and compares production, waste, and profit.
+
+\subsection{Parameters used in this block}
+\begin{itemize}
+  \item Environment: $N=600$, $L=6$, $r=0.35$, $\chi=1.0$, $\rho=2.5$, $\tau=0.8$.
+  \item Risk aversion: $\gamma=0.8$.
+  \item Epoch length: $D=30$ days.
+  \item Optimizer budget: population $P=80$, generations $G=30$.
+  \item Out-of-sample replications: 25.
+\end{itemize}
+
+\subsection{Out-of-sample summary table (executed output)}
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Demand spec & Prod$_B$ & Prod$_T$ & $\Delta$Prod & Waste$_B$ & Waste$_T$ & $\Delta$Waste & Profit$_B$ & Profit$_T$ & $\Delta$Profit & $b^\*$ \\
+\midrule
+constant $\alpha=0.35$ & 5550 & 5790 & 240 & 73.12 & 65.28 & -7.84 & 271.41 & 268.76 & -2.65 & 0.048 \\
+beta conc=5 (high vol) & 5160 & 5340 & 180 & 1026.76 & 1106.40 & 79.64 & 172.44 & 174.80 & 2.36 & 0.000 \\
+beta conc=20 & 5370 & 5250 & -120 & 452.80 & 391.52 & -61.28 & 230.77 & 229.87 & -0.89 & 0.000 \\
+logit-AR1 ($\phi=0.8$, $\sigma=0.6$) & 6390 & 5850 & -540 & 879.84 & 599.80 & -280.04 & 246.18 & 242.52 & -3.66 & 0.000 \\
+\bottomrule
+\end{tabular}
+\caption{Baseline vs TGTG (optimized $b$) across demand specifications. Values are out-of-sample means from the notebook run.}
+\end{table}
+
+\subsection{Figures generated by the notebook block}
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{prod_baseline_vs_tgtg.png}
+\caption{Production per day: baseline vs TGTG across demand specifications.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{delta_prod_by_spec.png}
+\caption{$\Delta$ production per day (TGTG minus baseline) across demand specifications.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{delta_waste_by_spec.png}
+\caption{$\Delta$ waste per day (TGTG minus baseline) across demand specifications.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{delta_profit_by_spec.png}
+\caption{$\Delta$ mean profit (TGTG minus baseline) across demand specifications (out-of-sample).}
+\end{figure}
+
+\subsection{Interpretation (aligned with the notebook’s intended questions)}
+The notebook’s robustness question is operationalized as the sign and magnitude of $\Delta$ production across demand models:
+\begin{itemize}
+  \item In this run, $\Delta$ production is positive under constant demand and highly volatile i.i.d. Beta shocks, but negative under moderate Beta volatility and persistent logit-AR(1) demand.
+  \item In several specifications, the optimizer chooses $b^\*=0$, meaning that even when ``TGTG is available'' the best-response found by the notebook is to not reserve inventory for TGTG.
+\end{itemize}
+
+\section{Hyperparameter sweep block (what the notebook does)}
+The notebook then defines a sweep over:
+\begin{itemize}
+  \item Number of goods $L \in \{3,6,10\}$.
+  \item Margin via $\rho/\chi \in \{1.8,2.5,3.2\}$ (implemented by setting $\rho=\text{margin}\cdot\chi$).
+  \item TGTG discount $\tau/\rho \in \{0.2,0.35,0.5\}$ (implemented by setting $\tau=\text{discount}\cdot\rho$).
+  \item Demand volatility via Beta concentration $\kappa \in \{5,20,100\}$.
+\end{itemize}
+For each sweep point, it trains a baseline ($b=0$) and a TGTG-available policy (optimize $b$), then evaluates both out-of-sample and stores:
+\[
+\Delta\mathrm{Production},\;\Delta\mathrm{Waste},\;\Delta\mathrm{Profit},\; b^\*.
+\]
+The notebook produces:
+\begin{itemize}
+  \item A plot of mean $\Delta$ production per day vs concentration (log scale), grouped by $L$.
+  \item A plot of mean $b^\*$ vs discount $\tau/\rho$.
+  \item Grouped summary tables (means by $L$ and concentration).
+\end{itemize}
+
+\section{Note on the TGTG price interpretation}
+As stated in the notebook text, $\tau$ is treated as a \emph{per-unit} TGTG price in this implementation.
+If you want a bag model (bag size $k$, price per bag), the simulator logic must be adjusted accordingly; the notebook explicitly flags this as a modeling choice.
+
+\end{document}
